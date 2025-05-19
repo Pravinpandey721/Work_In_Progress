@@ -1,0 +1,113 @@
+DECLARE 
+    @SQLBuild NVARCHAR(100),
+    @SQLEdition NVARCHAR(100),
+    @SQLPatchLevel NVARCHAR(50),
+    @SQLVersionFriendly NVARCHAR(50),
+    @TotalMemoryMB BIGINT,
+    @TotalMemoryGB DECIMAL(10,2),
+    @CPUCount INT,
+    @WindowsCaption NVARCHAR(200) = '',
+    @WindowsVersion NVARCHAR(50) = '',
+    @WindowsVersionFriendly NVARCHAR(50),
+    @WindowsEditionType NVARCHAR(50),
+    @HostName NVARCHAR(128),
+    @IPAddress NVARCHAR(50);
+
+-- Get SQL Server version info
+SELECT 
+    @SQLBuild = CONVERT(NVARCHAR(100), SERVERPROPERTY('ProductVersion')),
+    @SQLEdition = CONVERT(NVARCHAR(100), SERVERPROPERTY('Edition')),
+    @SQLPatchLevel = CONVERT(NVARCHAR(50), SERVERPROPERTY('ProductLevel'));
+
+-- Map SQL Server build to friendly version name
+IF LEFT(@SQLBuild,2) = '15' SET @SQLVersionFriendly = 'SQL Server 2019'
+ELSE IF LEFT(@SQLBuild,2) = '14' SET @SQLVersionFriendly = 'SQL Server 2017'
+ELSE IF LEFT(@SQLBuild,2) = '13' SET @SQLVersionFriendly = 'SQL Server 2016'
+ELSE IF LEFT(@SQLBuild,2) = '16' SET @SQLVersionFriendly = 'SQL Server 2022'
+ELSE SET @SQLVersionFriendly = 'SQL Server ' + @SQLBuild;
+
+-- Get memory and CPU count
+SELECT 
+    @TotalMemoryMB = physical_memory_kb / 1024,
+    @CPUCount = cpu_count
+FROM 
+    sys.dm_os_sys_info;
+
+-- Convert MB to GB (2 decimals)
+SET @TotalMemoryGB = CAST(@TotalMemoryMB AS DECIMAL(10,2)) / 1024;
+
+-- Get Windows OS info using xp_cmdshell
+DECLARE @OSOutput TABLE (Line NVARCHAR(4000));
+INSERT INTO @OSOutput
+EXEC xp_cmdshell 'wmic os get Caption,Version /value';
+
+SELECT 
+    @WindowsCaption = SUBSTRING(Line, CHARINDEX('=', Line) + 1, LEN(Line))
+FROM @OSOutput 
+WHERE Line LIKE 'Caption=%';
+
+SELECT 
+    @WindowsVersion = SUBSTRING(Line, CHARINDEX('=', Line) + 1, LEN(Line))
+FROM @OSOutput 
+WHERE Line LIKE 'Version=%';
+
+-- Map Windows version to friendly name
+IF @WindowsVersion LIKE '10.0.14393%' SET @WindowsVersionFriendly = 'Windows Server 2016'
+ELSE IF @WindowsVersion LIKE '10.0.17763%' SET @WindowsVersionFriendly = 'Windows Server 2019'
+ELSE IF @WindowsVersion LIKE '10.0.20348%' SET @WindowsVersionFriendly = 'Windows Server 2022'
+ELSE SET @WindowsVersionFriendly = @WindowsCaption;
+
+-- Parse Edition from Caption
+IF @WindowsCaption LIKE '%Standard%' SET @WindowsEditionType = 'Standard'
+ELSE IF @WindowsCaption LIKE '%Datacenter%' SET @WindowsEditionType = 'Datacenter'
+ELSE IF @WindowsCaption LIKE '%Enterprise%' SET @WindowsEditionType = 'Enterprise'
+ELSE SET @WindowsEditionType = 'Unknown';
+
+-- Get hostname
+DECLARE @HostOutput TABLE (Line NVARCHAR(255));
+INSERT INTO @HostOutput
+EXEC xp_cmdshell 'hostname';
+
+SELECT TOP 1 @HostName = RTRIM(LTRIM(Line))
+FROM @HostOutput
+WHERE Line IS NOT NULL AND Line <> '';
+
+-- Get IP address (IPv4) using wmic
+DECLARE @IPOutput TABLE (Line NVARCHAR(255));
+INSERT INTO @IPOutput
+EXEC xp_cmdshell 'wmic nicconfig where IPEnabled=true get IPAddress /value';
+
+DECLARE @RawIPLine NVARCHAR(255) = '';
+SELECT TOP 1 @RawIPLine = Line FROM @IPOutput WHERE Line LIKE 'IPAddress=%';
+
+-- Extract first IPv4 address from the string
+DECLARE @Start INT, @End INT, @ExtractedIP NVARCHAR(50);
+
+SET @Start = CHARINDEX('{', @RawIPLine);
+SET @End = CHARINDEX(',', @RawIPLine);
+
+IF @Start > 0 AND @End > @Start
+    SET @ExtractedIP = SUBSTRING(@RawIPLine, @Start + 2, @End - @Start - 3); -- remove quotes
+ELSE
+BEGIN
+    SET @End = CHARINDEX('}', @RawIPLine);
+    IF @Start > 0 AND @End > @Start
+        SET @ExtractedIP = SUBSTRING(@RawIPLine, @Start + 2, @End - @Start - 3);
+    ELSE
+        SET @ExtractedIP = NULL;
+END
+
+SET @IPAddress = @ExtractedIP;
+
+-- Final output
+SELECT 
+    @SQLVersionFriendly AS SQLServerVersion,
+    @SQLPatchLevel AS SQLServerPatchLevel,
+    @SQLEdition AS SQLServerEdition,
+    @TotalMemoryGB AS TotalMemoryGB,
+    @CPUCount AS LogicalCPUCount,
+    @WindowsVersionFriendly AS WindowsServerVersion,
+    @WindowsEditionType AS WindowsServerEditionType,
+    --@WindowsCaption AS WindowsServerEditionRaw,
+    @HostName AS HostName,
+    @IPAddress AS IPAddress;
