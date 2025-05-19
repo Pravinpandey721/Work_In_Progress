@@ -1,0 +1,91 @@
+CREATE PROCEDURE LogRestore 
+
+@DB varchar(50) = NULL  -- User input (can be NULL or a specific DB)
+
+AS
+
+BEGIN
+
+-- Log Shipping Restore Script --
+
+/*
+IT REQUIRE LINKED SERVER REPLACE YOUR LINKED SERVER NAME WITH THIS NAME >> [WIN-SQL-UAT\SQL_SERVER_02] <<
+*/
+
+DECLARE @DBName varchar(50);
+
+DECLARE @TrnDateTime datetime;
+DECLARE @LastRestoreTime datetime;
+
+-- Simulate user input (comment/uncomment as needed)
+-- SET @DB = 'YourDatabaseName';
+
+-- Temporary table to hold all databases to process
+DECLARE @DBList TABLE (DBName varchar(50));
+
+-- If @DB is provided, add it to the list
+IF (@DB IS NOT NULL AND LTRIM(RTRIM(@DB)) <> '')
+BEGIN
+    INSERT INTO @DBList (DBName)
+    VALUES (@DB);
+END
+ELSE
+BEGIN
+    -- No specific DB provided — get all log shipping secondary databases
+    INSERT INTO @DBList (DBName)
+    SELECT secondary_database
+    FROM [WIN-SQL-UAT\SQL_SERVER_02].[msdb].[dbo].[log_shipping_monitor_secondary];
+END
+
+-- Loop through all databases
+DECLARE db_cursor CURSOR FOR
+SELECT DBName FROM @DBList;
+
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @DBName;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    -- Get the last restored time -1 hour for this DB
+    SELECT @LastRestoreTime = DATEADD(hour, -1, last_restored_date)
+    FROM [WIN-SQL-UAT\SQL_SERVER_02].[msdb].[dbo].[log_shipping_monitor_secondary]
+    WHERE secondary_database = @DBName;
+
+    -- Skip if no restore time found
+    IF @LastRestoreTime IS NOT NULL
+    BEGIN
+        SET @TrnDateTime = @LastRestoreTime;
+
+        -- Output RESTORE LOG commands
+        PRINT '--- Restore commands for database: ' + @DBName;
+
+        SELECT
+            CONVERT(CHAR(100), SERVERPROPERTY('Servername')) AS Server,
+            bs.database_name,
+            'RESTORE LOG [' + @DBName + '] FROM DISK = ''' + 
+                REPLACE(bmf.physical_device_name, '\\0.00.00.00\Log Shipping', '\\00.000.00.000\Log Shipping') + 
+                ''' WITH NORECOVERY, STATS=1' AS RestoreCommand,
+            bs.backup_start_date,
+            bs.backup_finish_date,
+            DATEDIFF(MINUTE, bs.backup_start_date, bs.backup_finish_date) AS Duration_Minutes,
+            CAST(bs.backup_size AS NUMERIC(35,2)) / 1048576.0 / 1024.0 AS BackupSize_GB
+        FROM msdb.dbo.backupmediafamily bmf
+        INNER JOIN msdb.dbo.backupset bs ON bmf.media_set_id = bs.media_set_id
+        WHERE
+            bs.type = 'L' -- Log backups
+            AND bs.database_name = @DBName
+            AND bs.backup_start_date > @TrnDateTime
+        ORDER BY bs.backup_finish_date;
+    END
+    ELSE
+    BEGIN
+        PRINT 'No restore time found for database: ' + @DBName;
+    END
+
+    FETCH NEXT FROM db_cursor INTO @DBName;
+END
+
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
+
+END
